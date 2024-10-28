@@ -37,3 +37,22 @@ func XteaEncrypt(data []byte, k [64]uint32) {
 		}
 	}
 }
+
+func XteaDecrypt(data []byte, k [64]uint32) {
+	for i := len(k) - 2; i >= 0; i -= 2 {
+		for offset := 0; offset < len(data); offset += 8 {
+
+			// Handle left and right parts of the block
+			left := binary.LittleEndian.Uint32(data[offset : offset+4])
+			right := binary.LittleEndian.Uint32(data[offset+4 : offset+8])
+
+			// XTEA decryption round
+			right -= ((left << 4) ^ (left >> 5)) + left ^ k[i+1]
+			left -= ((right << 4) ^ (right >> 5)) + right ^ k[i]
+
+			// Store decrypted result back into data slice
+			binary.LittleEndian.PutUint32(data[offset:offset+4], left)
+			binary.LittleEndian.PutUint32(data[offset+4:offset+8], right)
+		}
+	}
+}
