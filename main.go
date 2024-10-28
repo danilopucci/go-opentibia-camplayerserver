@@ -1,17 +1,13 @@
 package main
 
 import (
-	"encoding/hex"
 	"fmt"
 	"go-opentibia-camplayerserver/config"
 	"go-opentibia-camplayerserver/crypt"
 	"go-opentibia-camplayerserver/packet"
-	"io"
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -90,7 +86,7 @@ func startCamServer(closeCamServerCh <-chan bool, wg *sync.WaitGroup, decrypter 
 				}
 
 				wg.Add(1)
-				go handleCamFileStreaming(wg, client)
+				go HandleCamFileStreaming(wg, client)
 				// go handleClientInputPackets()
 			}
 
@@ -191,153 +187,4 @@ func handleClientLoginRequest(conn net.Conn, decrypter *crypt.RSA, cfg *config.C
 
 	request.IsValid = true
 	return request, nil
-}
-
-func handleCamFileStreaming(wg *sync.WaitGroup, client *Client) {
-	defer wg.Done()
-
-	file, err := os.Open("Test_2_25-10-2024-18-36-45.cam")
-	if err != nil {
-		fmt.Println("Error opening file:", err)
-		return
-	}
-	defer file.Close()
-
-	chunk := make([]byte, chunkSize)
-	var readOffset int64 = 0
-	isProcessingFile := true
-
-	for isProcessingFile {
-		select {
-		case <-client.cancelCh:
-			fmt.Printf("CamServer is shutting down and closing file %s\n", file.Name())
-			return
-
-		default:
-			lines, err := retrieveLines(file, chunk, &readOffset)
-
-			var previousTimestamp int64
-			for _, line := range lines {
-				select {
-
-				case <-client.cancelCh:
-					fmt.Printf("CamServer is shutting down and closing file %s\n", file.Name())
-					return
-
-				default:
-
-					err := processAndSendPacket(client, line, &previousTimestamp)
-					if err != nil {
-						fmt.Printf("error while sending data: %s", err)
-					}
-				}
-			}
-
-			// Break the loop on EOF, but after processing the remaining data
-			if err != nil {
-				if err == io.EOF {
-					fmt.Println("EOF reached")
-					///TODO: send logout packet
-				} else {
-					fmt.Println("Error reading file:", err)
-				}
-				isProcessingFile = false
-			}
-		}
-
-	}
-}
-
-func retrieveLines(file *os.File, chunk []byte, readOffset *int64) ([][]byte, error) {
-	//checar se o arquivo esta aberto
-
-	bytesRead, err := file.ReadAt(chunk, *readOffset)
-	var lines [][]byte
-
-	// Process the chunk if any bytes were read
-	if bytesRead > 0 {
-		*readOffset += int64(bytesRead)
-
-		// Find newlines in the chunk and split by them
-		var lastNewline int
-		for i := 0; i < bytesRead; i++ {
-			if chunk[i] == '\n' {
-				// Process the line between lastNewline and current newline position
-				line := chunk[lastNewline : i+1] // Include the '\n'
-				lines = append(lines, line)
-				//fmt.Printf("Processed line: %s", line)
-				lastNewline = i + 1
-			}
-		}
-
-		// If there is an incomplete line at the end, adjust readOffset
-		if lastNewline < bytesRead {
-			// Adjust the readOffset to re-read the incomplete line in the next cycle
-			*readOffset -= int64(bytesRead - lastNewline)
-		}
-	}
-
-	// Break the loop on EOF, but after processing the remaining data
-	if err != nil {
-		if err == io.EOF {
-			fmt.Println("EOF reached")
-		} else {
-			fmt.Println("Error reading file:", err)
-		}
-	}
-
-	return lines, err
-}
-
-func processAndSendPacket(client *Client, rawPacket []byte, previousTimestamp *int64) error {
-
-	fields := strings.Fields(string(rawPacket))
-	if len(fields) < 3 {
-		return fmt.Errorf("invalid data format")
-	}
-
-	direction := fields[0]
-	if direction != "<" && direction != ">" {
-		return fmt.Errorf("invalid packet direction")
-	}
-
-	if direction != "<" {
-		return nil
-	}
-
-	// Parse the timestamp
-	timestamp, err := strconv.ParseInt(fields[1], 10, 64)
-	if err != nil {
-		return fmt.Errorf("invalid timestamp format: %v", err)
-	}
-
-	// If previous timestamp exists, calculate delay
-	if *previousTimestamp != 0 {
-		delay := time.Duration(timestamp - *previousTimestamp)
-		time.Sleep(delay * time.Millisecond)
-	}
-	*previousTimestamp = timestamp // Update previous timestamp
-
-	hexString := fields[2]
-
-	byteData, err := hex.DecodeString(hexString)
-	if err != nil {
-		return fmt.Errorf("error decoding hex string: %v", err)
-	}
-
-	outgoingPacket := packet.NewOutgoing(len(byteData))
-	outgoingPacket.AddBytes(byteData)
-	outgoingPacket.XteaEncrypt(client.XteaKey)
-	outgoingPacket.HeaderAddSize()
-
-	dataToSend := outgoingPacket.Get()
-
-	// Send the byte data over the TCP connection
-	_, err = client.conn.Write(dataToSend)
-	if err != nil {
-		return fmt.Errorf("error sending data over TCP connection: %v", err)
-	}
-
-	//fmt.Printf("Sent %d bytes over TCP: %x\n", len(dataToSend), dataToSend)
-	return nil
 }
