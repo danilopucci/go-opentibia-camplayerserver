@@ -2,6 +2,8 @@ package packet
 
 import (
 	"encoding/binary"
+	"fmt"
+	"go-opentibia-camplayerserver/crypt"
 )
 
 type Incoming struct {
@@ -76,4 +78,19 @@ func (p *Incoming) GetStringSlice(length int) string {
 
 func (p *Incoming) PeekBuffer() []byte {
 	return p.buffer[p.position:]
+}
+
+func (p *Incoming) XteaDecrypt(xteaKey [4]uint32) error {
+
+	lengthHeader := p.GetUint16()
+	if lengthHeader%8 != 0 {
+		return fmt.Errorf("error decrypting IncomingPacket: packet length is not multiple of eigth")
+	}
+
+	expandedXteaKey := crypt.ExpandXteaKey(xteaKey)
+	crypt.XteaDecrypt(p.PeekBuffer(), expandedXteaKey)
+
+	p.GetUint16()
+
+	return nil
 }
