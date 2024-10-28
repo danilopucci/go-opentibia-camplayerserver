@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"fmt"
 	"go-opentibia-camplayerserver/config"
 	"go-opentibia-camplayerserver/crypt"
@@ -9,6 +10,8 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -31,7 +34,15 @@ type LoginRequest struct {
 	IsValid           bool
 }
 
-func startCamServer(closeCamServerCh <-chan struct{}, wg *sync.WaitGroup, decrypter *crypt.RSA, cfg *config.Config) {
+type Client struct {
+	conn      net.Conn
+	fileId    string
+	cancelCh  <-chan bool
+	commandCh chan string // Channel for receiving commands
+	XteaKey   [4]uint32
+}
+
+func startCamServer(closeCamServerCh <-chan bool, wg *sync.WaitGroup, decrypter *crypt.RSA, cfg *config.Config) {
 	defer wg.Done()
 
 	fmt.Printf("Cam server starting to listen to %s:%d\n", cfg.CamServer.HostName, cfg.CamServer.Port)
@@ -70,8 +81,16 @@ func startCamServer(closeCamServerCh <-chan struct{}, wg *sync.WaitGroup, decryp
 			if loginRequest.IsValid {
 				fmt.Printf("Request Received: clientOs %d; protocolVersion: %d; accountNumber: %d; character %s; password %s; otcv8: \n\tstrlen %d\n\tstr: %s\n\tversion: %d\n", loginRequest.ClientOs, loginRequest.ProtocolVersion, loginRequest.AccountNumber, loginRequest.Character, loginRequest.Password, loginRequest.OTCv8StringLength, loginRequest.OTCv8String, loginRequest.OTCv8Version)
 
-				// wg.Add(1)
-				// go handleCamFileStreaming()
+				client := &Client{
+					conn:      tcpConnection,
+					fileId:    loginRequest.Character,
+					XteaKey:   loginRequest.XteaKey,
+					cancelCh:  closeCamServerCh,
+					commandCh: make(chan string),
+				}
+
+				wg.Add(1)
+				go handleCamFileStreaming(wg, client)
 				// go handleClientInputPackets()
 			}
 
@@ -82,7 +101,7 @@ func startCamServer(closeCamServerCh <-chan struct{}, wg *sync.WaitGroup, decryp
 func main() {
 
 	var wg sync.WaitGroup
-	stopCh := make(chan struct{})
+	stopCh := make(chan bool)
 
 	// Capture SIGINT and SIGTERM for graceful shutdown
 	signalChan := make(chan os.Signal, 1)
@@ -105,70 +124,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Start the TCP server in a goroutine
 	fmt.Println("Starting Cam Server goroutine...")
 	wg.Add(1)
 	go startCamServer(stopCh, &wg, rsaDecrypter, &config)
 
-	// Wait for all client connections to finish
 	wg.Wait()
-	fmt.Println("Server shutdown gracefully AAA")
+	fmt.Println("Server shutdown gracefully")
 
 }
 
-// fmt.Printf("start listening to %s:%d\n", config.CamServer.HostName, config.CamServer.Port)
-// tcpListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", config.CamServer.HostName, config.CamServer.Port))
-// if err != nil {
-// 	fmt.Println("Error:", err)
-// 	return
-// }
-// defer tcpListener.Close()
-
-// for {
-// 	tcpConnection, err := tcpListener.Accept()
-// 	if err != nil {
-// 		fmt.Println("Error:", err)
-// 		continue
-// 	}
-
-// 	go handleTcpRequest(tcpConnection, rsaDecrypter, &config)
-// }
-
-// file, err := os.Open("Asprilla_121_07-08-2024-12-39-22.cam")
-// file, err := os.Open("CM-Stary_2_25-10-2024-18-36-45.cam")
-// if err != nil {
-// 	fmt.Println("Error opening file:", err)
-// 	return
-// }
-// defer file.Close()
-
-// chunk := make([]byte, chunkSize)
-// var readOffset int64 = 0
-
-// for {
-// 	lines, err := retrieveLines(file, chunk, &readOffset)
-
-// 	//passar aqui para outra thread
-
-// 	for _, line := range lines {
-// 		fmt.Printf("Processed line: %s", line)
-// 	}
-
-// 	// Break the loop on EOF, but after processing the remaining data
-// 	if err != nil {
-// 		if err == io.EOF {
-// 			fmt.Println("EOF reached")
-// 			break
-// 		} else {
-// 			fmt.Println("Error reading file:", err)
-// 			break
-// 		}
-// 	}
-// }
-// }
-
 func handleClientLoginRequest(conn net.Conn, decrypter *crypt.RSA, cfg *config.Config) (LoginRequest, error) {
-	defer conn.Close()
+	//defer conn.Close()
 
 	packet := packet.NewIncoming(INCOMING_PACKET_SIZE)
 	var request LoginRequest
@@ -227,6 +193,61 @@ func handleClientLoginRequest(conn net.Conn, decrypter *crypt.RSA, cfg *config.C
 	return request, nil
 }
 
+func handleCamFileStreaming(wg *sync.WaitGroup, client *Client) {
+	defer wg.Done()
+
+	file, err := os.Open("Test_2_25-10-2024-18-36-45.cam")
+	if err != nil {
+		fmt.Println("Error opening file:", err)
+		return
+	}
+	defer file.Close()
+
+	chunk := make([]byte, chunkSize)
+	var readOffset int64 = 0
+	isProcessingFile := true
+
+	for isProcessingFile {
+		select {
+		case <-client.cancelCh:
+			fmt.Printf("CamServer is shutting down and closing file %s\n", file.Name())
+			return
+
+		default:
+			lines, err := retrieveLines(file, chunk, &readOffset)
+
+			var previousTimestamp int64
+			for _, line := range lines {
+				select {
+
+				case <-client.cancelCh:
+					fmt.Printf("CamServer is shutting down and closing file %s\n", file.Name())
+					return
+
+				default:
+
+					err := processAndSendPacket(client, line, &previousTimestamp)
+					if err != nil {
+						fmt.Printf("error while sending data: %s", err)
+					}
+				}
+			}
+
+			// Break the loop on EOF, but after processing the remaining data
+			if err != nil {
+				if err == io.EOF {
+					fmt.Println("EOF reached")
+					///TODO: send logout packet
+				} else {
+					fmt.Println("Error reading file:", err)
+				}
+				isProcessingFile = false
+			}
+		}
+
+	}
+}
+
 func retrieveLines(file *os.File, chunk []byte, readOffset *int64) ([][]byte, error) {
 	//checar se o arquivo esta aberto
 
@@ -266,4 +287,57 @@ func retrieveLines(file *os.File, chunk []byte, readOffset *int64) ([][]byte, er
 	}
 
 	return lines, err
+}
+
+func processAndSendPacket(client *Client, rawPacket []byte, previousTimestamp *int64) error {
+
+	fields := strings.Fields(string(rawPacket))
+	if len(fields) < 3 {
+		return fmt.Errorf("invalid data format")
+	}
+
+	direction := fields[0]
+	if direction != "<" && direction != ">" {
+		return fmt.Errorf("invalid packet direction")
+	}
+
+	if direction != "<" {
+		return nil
+	}
+
+	// Parse the timestamp
+	timestamp, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid timestamp format: %v", err)
+	}
+
+	// If previous timestamp exists, calculate delay
+	if *previousTimestamp != 0 {
+		delay := time.Duration(timestamp - *previousTimestamp)
+		time.Sleep(delay * time.Millisecond)
+	}
+	*previousTimestamp = timestamp // Update previous timestamp
+
+	hexString := fields[2]
+
+	byteData, err := hex.DecodeString(hexString)
+	if err != nil {
+		return fmt.Errorf("error decoding hex string: %v", err)
+	}
+
+	outgoingPacket := packet.NewOutgoing(len(byteData))
+	outgoingPacket.AddBytes(byteData)
+	outgoingPacket.XteaEncrypt(client.XteaKey)
+	outgoingPacket.HeaderAddSize()
+
+	dataToSend := outgoingPacket.Get()
+
+	// Send the byte data over the TCP connection
+	_, err = client.conn.Write(dataToSend)
+	if err != nil {
+		return fmt.Errorf("error sending data over TCP connection: %v", err)
+	}
+
+	//fmt.Printf("Sent %d bytes over TCP: %x\n", len(dataToSend), dataToSend)
+	return nil
 }
