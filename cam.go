@@ -18,11 +18,11 @@ type CamPacket struct {
 	Data      []byte
 }
 
-func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client) {
+func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client, filePath string) {
 	defer wg.Done()
 	defer client.conn.Close()
 
-	file, err := os.Open("Test_2_25-10-2024-18-36-45.cam")
+	file, err := os.Open(filePath)
 	if err != nil {
 		fmt.Println("Error opening file:", err)
 		return
@@ -39,6 +39,10 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client) {
 		case <-client.cancelCh:
 			fmt.Printf("CamServer is shutting down and closing file %s\n", file.Name())
 			return
+
+		case command := <-client.commandCh:
+			fmt.Printf("received command %s\n", command)
+			continue
 
 		default:
 			lines, err := retrieveLines(file, chunk, &readOffset)

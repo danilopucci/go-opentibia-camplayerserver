@@ -33,12 +33,12 @@ type LoginRequest struct {
 type Client struct {
 	conn      net.Conn
 	fileId    string
-	cancelCh  <-chan bool
+	cancelCh  <-chan struct{}
 	commandCh chan string // Channel for receiving commands
 	XteaKey   [4]uint32
 }
 
-func startCamServer(closeCamServerCh <-chan bool, wg *sync.WaitGroup, decrypter *crypt.RSA, cfg *config.Config) {
+func startCamServer(closeCamServerCh <-chan struct{}, wg *sync.WaitGroup, decrypter *crypt.RSA, cfg *config.Config) {
 	defer wg.Done()
 
 	fmt.Printf("Cam server starting to listen to %s:%d\n", cfg.CamServer.HostName, cfg.CamServer.Port)
@@ -86,8 +86,9 @@ func startCamServer(closeCamServerCh <-chan bool, wg *sync.WaitGroup, decrypter 
 				}
 
 				wg.Add(1)
-				go HandleCamFileStreaming(wg, client)
-				// go handleClientInputPackets()
+				go HandleCamFileStreaming(wg, client, "Test_2_25-10-2024-18-36-45.cam")
+				wg.Add(1)
+				go handleClientInputPackets(wg, client)
 			}
 
 		}
@@ -97,7 +98,7 @@ func startCamServer(closeCamServerCh <-chan bool, wg *sync.WaitGroup, decrypter 
 func main() {
 
 	var wg sync.WaitGroup
-	stopCh := make(chan bool)
+	stopCh := make(chan struct{})
 
 	// Capture SIGINT and SIGTERM for graceful shutdown
 	signalChan := make(chan os.Signal, 1)
@@ -187,4 +188,68 @@ func handleClientLoginRequest(conn net.Conn, decrypter *crypt.RSA, cfg *config.C
 
 	request.IsValid = true
 	return request, nil
+}
+
+func handleClientInputPackets(wg *sync.WaitGroup, client *Client) {
+	defer wg.Done()
+	//defer client.conn.Close()
+
+	for {
+		select {
+		case <-client.cancelCh:
+			fmt.Println("Client disconnected or cancelled command")
+			return
+
+		default:
+			client.conn.SetReadDeadline(time.Now().Add(time.Second))
+
+			packet := packet.NewIncoming(INCOMING_PACKET_SIZE)
+			reqLen, err := client.conn.Read(packet.PeekBuffer())
+
+			if err != nil {
+				if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
+					continue
+				}
+				fmt.Println("exiting handleClientInputPackets")
+				continue
+			}
+
+			packet.Resize(reqLen)
+			err = packet.XteaDecrypt(client.XteaKey)
+			if err != nil {
+				fmt.Println(err)
+				continue
+			}
+
+			parsePacket(client, packet)
+		}
+	}
+
+}
+
+func parsePacket(client *Client, packet *packet.Incoming) {
+
+	opCode := packet.GetUint8()
+
+	fmt.Printf("packet received: %x\n", opCode)
+
+	switch opCode {
+
+	case 0x14:
+		client.commandCh <- "logout"
+		return
+	case 0x6F:
+		client.commandCh <- "speedUp"
+		return
+	case 0x70:
+		client.commandCh <- "moveFoward"
+		return
+	case 0x71:
+		client.commandCh <- "speedDown"
+		return
+	case 0x72:
+		client.commandCh <- "moveBackward"
+		return
+	}
+
 }
