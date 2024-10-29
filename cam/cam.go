@@ -1,8 +1,9 @@
-package main
+package cam
 
 import (
 	"encoding/hex"
 	"fmt"
+	"go-opentibia-camplayerserver/client"
 	"go-opentibia-camplayerserver/protocol"
 	"io"
 	"os"
@@ -12,15 +13,17 @@ import (
 	"time"
 )
 
+const chunkSize = 28192
+
 type CamPacket struct {
 	Timestamp int64
 	Type      string
 	Data      []byte
 }
 
-func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client, filePath string) {
+func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath string) {
 	defer wg.Done()
-	defer client.conn.Close()
+	defer c.Conn.Close()
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -31,48 +34,51 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client, filePath string)
 
 	chunk := make([]byte, chunkSize)
 	readOffset := int64(0)
-	isProcessingFile := true
 
-	var lines []string
-	pendingLinesToProcess := int(0)
-	currentProcessingLine := int(0)
-	//var retrieveLinesError error
+	var packetsBucket []string
+	currentIndexFromPacketsBucket := int(0)
 	fileLine := 0
 	previousTimestamp := int64(0)
+	nextProcessPacketTimestamp := time.Now()
 
-	for isProcessingFile {
+	processPacketSleep := 5 * time.Millisecond
+
+	for {
 		select {
-		case <-client.cancelCh:
+		case <-c.CancelCh:
 			fmt.Printf("CamServer is shutting down and closing file %s\n", file.Name())
 			return
 
-		case command := <-client.commandCh:
+		case command := <-c.CommandCh:
 			fmt.Printf("received command %s\n", command)
 			continue
 
 		default:
-			if pendingLinesToProcess <= 0 {
-				lines, _ = retrieveLines(file, chunk, &readOffset)
-				currentProcessingLine = 0
-				pendingLinesToProcess = len(lines) - currentProcessingLine
 
-				if pendingLinesToProcess == 0 {
-					fmt.Printf("Finished to play cam file %s, closing connection in few seconds\n", file.Name())
+			if time.Now().Before(nextProcessPacketTimestamp) {
+				time.Sleep(processPacketSleep)
+				continue
+			}
+
+			if currentIndexFromPacketsBucket >= len(packetsBucket) {
+				packetsBucket, _ = retrieveLines(file, chunk, &readOffset)
+				currentIndexFromPacketsBucket = 0
+
+				if len(packetsBucket) == 0 {
+					fmt.Printf("Finished to play cam file %s, closing Connection in few seconds\n", file.Name())
 					time.Sleep(5 * time.Second)
-					isProcessingFile = false
-					continue
+					return
 				}
 			}
 
-			camPacket, err := parseCamPacket(&lines[currentProcessingLine])
+			camPacket, err := parseCamPacket(&packetsBucket[currentIndexFromPacketsBucket])
 			fileLine += 1
-			currentProcessingLine += 1
-			pendingLinesToProcess -= 1
+			currentIndexFromPacketsBucket += 1
 
-			fmt.Printf("HandleCamFileStreaming - pendingLinesToProcess %d; currentProcessingLine %d; pendingLinesToProcess %d, fileLine %d\n", pendingLinesToProcess, currentProcessingLine, pendingLinesToProcess, fileLine)
+			fmt.Printf("HandleCamFileStreaming - currentPacketIndexFromBucket %d; fileLine %d\n", currentIndexFromPacketsBucket, fileLine)
 
 			if err != nil {
-				fmt.Printf("error while parsing CamPacket: %s in file: %s; line: %d; data: %s", err, file.Name(), fileLine, lines[currentProcessingLine])
+				fmt.Printf("error while parsing CamPacket: %s in file: %s; line: %d; data: %s", err, file.Name(), fileLine, packetsBucket[currentIndexFromPacketsBucket])
 				continue
 			}
 
@@ -82,21 +88,11 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client, filePath string)
 
 			if previousTimestamp != 0 {
 				delay := time.Duration(camPacket.Timestamp - previousTimestamp)
-				time.Sleep(delay * time.Millisecond)
+				nextProcessPacketTimestamp = time.Now().Add(delay * time.Millisecond)
 			}
 			previousTimestamp = camPacket.Timestamp
 
-			protocol.SendRawData(client.conn, client.XteaKey, &camPacket.Data)
-
-			// if retrieveLinesError != nil {
-			// 	if retrieveLinesError == io.EOF && len(lines) == 0 {
-			// 		fmt.Printf("Finished to play cam file %s, closing connection in few seconds\n", file.Name())
-			// 		time.Sleep(5 * time.Second)
-			// 	} else {
-			// 		fmt.Printf("Error reading file %s: %s\n", file.Name(), retrieveLinesError)
-			// 	}
-			// 	isProcessingFile = false
-			// }
+			protocol.SendRawData(c.Conn, c.XteaKey, &camPacket.Data)
 		}
 	}
 }

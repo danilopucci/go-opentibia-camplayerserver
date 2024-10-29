@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"go-opentibia-camplayerserver/cam"
+	"go-opentibia-camplayerserver/client"
 	"go-opentibia-camplayerserver/config"
 	"go-opentibia-camplayerserver/crypt"
 	"go-opentibia-camplayerserver/packet"
@@ -14,7 +16,6 @@ import (
 )
 
 const INCOMING_PACKET_SIZE = 1024
-const chunkSize = 28192
 
 type LoginRequest struct {
 	ClientOs          uint16
@@ -28,14 +29,6 @@ type LoginRequest struct {
 	OTCv8String       string
 	OTCv8Version      uint16
 	IsValid           bool
-}
-
-type Client struct {
-	conn      net.Conn
-	fileId    string
-	cancelCh  <-chan struct{}
-	commandCh chan string // Channel for receiving commands
-	XteaKey   [4]uint32
 }
 
 func startCamServer(closeCamServerCh <-chan struct{}, wg *sync.WaitGroup, decrypter *crypt.RSA, cfg *config.Config) {
@@ -77,16 +70,16 @@ func startCamServer(closeCamServerCh <-chan struct{}, wg *sync.WaitGroup, decryp
 			if loginRequest.IsValid {
 				fmt.Printf("Request Received: clientOs %d; protocolVersion: %d; accountNumber: %d; character %s; password %s; otcv8: \n\tstrlen %d\n\tstr: %s\n\tversion: %d\n", loginRequest.ClientOs, loginRequest.ProtocolVersion, loginRequest.AccountNumber, loginRequest.Character, loginRequest.Password, loginRequest.OTCv8StringLength, loginRequest.OTCv8String, loginRequest.OTCv8Version)
 
-				client := &Client{
-					conn:      tcpConnection,
-					fileId:    loginRequest.Character,
+				client := &client.Client{
+					Conn:      tcpConnection,
+					FileId:    loginRequest.Character,
 					XteaKey:   loginRequest.XteaKey,
-					cancelCh:  closeCamServerCh,
-					commandCh: make(chan string),
+					CancelCh:  closeCamServerCh,
+					CommandCh: make(chan string),
 				}
 
 				wg.Add(1)
-				go HandleCamFileStreaming(wg, client, "Test_2_25-10-2024-18-36-45.cam")
+				go cam.HandleCamFileStreaming(wg, client, "Test_2_25-10-2024-18-36-45.cam")
 				wg.Add(1)
 				go handleClientInputPackets(wg, client)
 			}
@@ -190,21 +183,21 @@ func handleClientLoginRequest(conn net.Conn, decrypter *crypt.RSA, cfg *config.C
 	return request, nil
 }
 
-func handleClientInputPackets(wg *sync.WaitGroup, client *Client) {
+func handleClientInputPackets(wg *sync.WaitGroup, c *client.Client) {
 	defer wg.Done()
 	//defer client.conn.Close()
 
 	for {
 		select {
-		case <-client.cancelCh:
+		case <-c.CancelCh:
 			fmt.Println("Client disconnected or cancelled command")
 			return
 
 		default:
-			client.conn.SetReadDeadline(time.Now().Add(time.Second))
+			c.Conn.SetReadDeadline(time.Now().Add(time.Second))
 
 			packet := packet.NewIncoming(INCOMING_PACKET_SIZE)
-			reqLen, err := client.conn.Read(packet.PeekBuffer())
+			reqLen, err := c.Conn.Read(packet.PeekBuffer())
 
 			if err != nil {
 				if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
@@ -214,40 +207,40 @@ func handleClientInputPackets(wg *sync.WaitGroup, client *Client) {
 			}
 
 			packet.Resize(reqLen)
-			err = packet.XteaDecrypt(client.XteaKey)
+			err = packet.XteaDecrypt(c.XteaKey)
 			if err != nil {
 				fmt.Println(err)
 				continue
 			}
 
-			parsePacket(client, packet)
+			parsePacket(c, packet)
 		}
 	}
 
 }
 
-func parsePacket(client *Client, packet *packet.Incoming) {
+func parsePacket(c *client.Client, packet *packet.Incoming) {
 
 	opCode := packet.GetUint8()
 
-	fmt.Printf("packet received: %x\n", opCode)
+	//fmt.Printf("packet received: %x\n", opCode)
 
 	switch opCode {
 
 	case 0x14:
-		client.commandCh <- "logout"
+		c.CommandCh <- "logout"
 		return
 	case 0x6F:
-		client.commandCh <- "speedUp"
+		c.CommandCh <- "speedUp"
 		return
 	case 0x70:
-		client.commandCh <- "moveFoward"
+		c.CommandCh <- "moveFoward"
 		return
 	case 0x71:
-		client.commandCh <- "speedDown"
+		c.CommandCh <- "speedDown"
 		return
 	case 0x72:
-		client.commandCh <- "moveBackward"
+		c.CommandCh <- "moveBackward"
 		return
 	}
 
