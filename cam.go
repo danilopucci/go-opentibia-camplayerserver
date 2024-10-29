@@ -32,7 +32,13 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client, filePath string)
 	chunk := make([]byte, chunkSize)
 	readOffset := int64(0)
 	isProcessingFile := true
+
+	var lines []string
+	pendingLinesToProcess := int(0)
+	currentProcessingLine := int(0)
+	//var retrieveLinesError error
 	fileLine := 0
+	previousTimestamp := int64(0)
 
 	for isProcessingFile {
 		select {
@@ -45,47 +51,52 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, client *Client, filePath string)
 			continue
 
 		default:
-			lines, err := retrieveLines(file, chunk, &readOffset)
+			if pendingLinesToProcess <= 0 {
+				lines, _ = retrieveLines(file, chunk, &readOffset)
+				currentProcessingLine = 0
+				pendingLinesToProcess = len(lines) - currentProcessingLine
 
-			var previousTimestamp int64
-			for _, line := range lines {
-				fileLine += 1
-				select {
-				case <-client.cancelCh:
-					fmt.Printf("CamServer is shutting down and closing file %s\n", file.Name())
-					return
-
-				default:
-					camPacket, err := parseCamPacket(&line)
-
-					if err != nil {
-						fmt.Printf("error while parsing CamPacket: %s in file: %s; line: %d; data: %s", err, file.Name(), fileLine, line)
-						continue
-					}
-
-					if camPacket.Type != "<" {
-						continue
-					}
-
-					if previousTimestamp != 0 {
-						delay := time.Duration(camPacket.Timestamp - previousTimestamp)
-						time.Sleep(delay * time.Millisecond)
-					}
-					previousTimestamp = camPacket.Timestamp
-
-					protocol.SendRawData(client.conn, client.XteaKey, &camPacket.Data)
-				}
-			}
-
-			if err != nil {
-				if err == io.EOF {
+				if pendingLinesToProcess == 0 {
 					fmt.Printf("Finished to play cam file %s, closing connection in few seconds\n", file.Name())
 					time.Sleep(5 * time.Second)
-				} else {
-					fmt.Printf("Error reading file %s: %s\n", file.Name(), err)
+					isProcessingFile = false
+					continue
 				}
-				isProcessingFile = false
 			}
+
+			camPacket, err := parseCamPacket(&lines[currentProcessingLine])
+			fileLine += 1
+			currentProcessingLine += 1
+			pendingLinesToProcess -= 1
+
+			fmt.Printf("HandleCamFileStreaming - pendingLinesToProcess %d; currentProcessingLine %d; pendingLinesToProcess %d, fileLine %d\n", pendingLinesToProcess, currentProcessingLine, pendingLinesToProcess, fileLine)
+
+			if err != nil {
+				fmt.Printf("error while parsing CamPacket: %s in file: %s; line: %d; data: %s", err, file.Name(), fileLine, lines[currentProcessingLine])
+				continue
+			}
+
+			if camPacket.Type != "<" {
+				continue
+			}
+
+			if previousTimestamp != 0 {
+				delay := time.Duration(camPacket.Timestamp - previousTimestamp)
+				time.Sleep(delay * time.Millisecond)
+			}
+			previousTimestamp = camPacket.Timestamp
+
+			protocol.SendRawData(client.conn, client.XteaKey, &camPacket.Data)
+
+			// if retrieveLinesError != nil {
+			// 	if retrieveLinesError == io.EOF && len(lines) == 0 {
+			// 		fmt.Printf("Finished to play cam file %s, closing connection in few seconds\n", file.Name())
+			// 		time.Sleep(5 * time.Second)
+			// 	} else {
+			// 		fmt.Printf("Error reading file %s: %s\n", file.Name(), retrieveLinesError)
+			// 	}
+			// 	isProcessingFile = false
+			// }
 		}
 	}
 }

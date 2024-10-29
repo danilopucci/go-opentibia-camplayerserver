@@ -210,8 +210,7 @@ func handleClientInputPackets(wg *sync.WaitGroup, client *Client) {
 				if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
 					continue
 				}
-				fmt.Println("exiting handleClientInputPackets")
-				continue
+				return
 			}
 
 			packet.Resize(reqLen)
