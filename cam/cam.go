@@ -25,6 +25,10 @@ type CamStats struct {
 	date        string
 }
 
+func (c *CamStats) Format() string {
+	return fmt.Sprintf("%.1f | Speed: %.2fx", c.currentTime, c.speed)
+}
+
 func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath string) {
 	defer wg.Done()
 	defer c.Conn.Close()
@@ -40,8 +44,9 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 
 	previousTimestamp := int64(0)
 	nextProcessPacketTimestamp := time.Now()
+	nextBeatcountTimestamp := time.Now()
 
-	processPacketSleep := 5 * time.Millisecond
+	poolInterval := 5 * time.Millisecond
 
 	var camStats CamStats
 	camStats.speed = 1.0
@@ -75,39 +80,46 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 
 		default:
 
-			if time.Now().Before(nextProcessPacketTimestamp) {
-				time.Sleep(processPacketSleep)
-				continue
-			}
+			if time.Now().After(nextProcessPacketTimestamp) {
 
-			camPacket, err := camFileReader.NextPacket()
+				camPacket, err := camFileReader.NextPacket()
 
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					fmt.Printf("Finished to play cam file %s, closing Connection in few seconds\n", camFileReader.Filename())
-					time.Sleep(5 * time.Second)
+				if err != nil {
+					if errors.Is(err, io.EOF) {
+						fmt.Printf("Finished to play cam file %s, closing Connection in few seconds\n", camFileReader.Filename())
+						time.Sleep(5 * time.Second)
+						return
+					} else if parseErr := new(ParseError); errors.As(err, &parseErr) {
+						fmt.Printf("%v", parseErr)
+						continue
+					}
+
+					fmt.Printf("Unexpected error: %v\n", err)
 					return
-				} else if parseErr := new(ParseError); errors.As(err, &parseErr) {
-					fmt.Printf("%v", parseErr)
+				}
+
+				if camPacket.Type != "<" {
 					continue
 				}
 
-				fmt.Printf("Unexpected error: %v\n", err)
-				return
+				if previousTimestamp != 0 {
+					delay := time.Duration(float32(camPacket.Timestamp-previousTimestamp) / camStats.speed)
+					nextProcessPacketTimestamp = time.Now().Add(delay * time.Millisecond)
+				}
+				previousTimestamp = camPacket.Timestamp
+
+				camStats.currentTime = float32(camPacket.Timestamp) / 1000.0
+
+				protocol.SendRawData(c.Conn, c.XteaKey, &camPacket.Data)
+
 			}
 
-			if camPacket.Type != "<" {
-				continue
+			if time.Now().After(nextBeatcountTimestamp) {
+				protocol.SendTextMessage(c.Conn, c.XteaKey, camStats.Format(), "1")
+				nextBeatcountTimestamp = time.Now().Add(100 * time.Millisecond)
 			}
 
-			if previousTimestamp != 0 {
-				delay := time.Duration(float32(camPacket.Timestamp-previousTimestamp) / camStats.speed)
-				nextProcessPacketTimestamp = time.Now().Add(delay * time.Millisecond)
-			}
-			previousTimestamp = camPacket.Timestamp
-
-			protocol.SendRawData(c.Conn, c.XteaKey, &camPacket.Data)
-			protocol.SendTextMessage(c.Conn, c.XteaKey, fmt.Sprintf("Speed: %f", camStats.speed), "1")
+			time.Sleep(poolInterval)
 		}
 	}
 }
