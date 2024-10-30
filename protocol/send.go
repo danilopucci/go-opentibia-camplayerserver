@@ -23,6 +23,15 @@ func SendClientError(conn net.Conn, xteaKey [4]uint32, errorData string) {
 	SendData(conn, xteaKey, packet)
 }
 
+func SendTextMessage(conn net.Conn, xteaKey [4]uint32, message string, messageType string) {
+	packet := packet.NewOutgoing(1 + 2 + len(message)) // message type + string length + string
+	packet.AddUint8(0xB4)
+	packet.AddUint8(0x17)
+	packet.AddString(message)
+
+	SendData(conn, xteaKey, packet)
+}
+
 func SendData(conn net.Conn, xteaKey [4]uint32, packet *packet.Outgoing) error {
 	packet.XteaEncrypt(xteaKey)
 	packet.HeaderAddSize()
