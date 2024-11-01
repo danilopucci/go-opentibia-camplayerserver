@@ -1,10 +1,12 @@
 package cam
 
 import (
+	"compress/gzip"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -19,21 +21,22 @@ func (e *ParseError) Error() string {
 
 type CamFileReader struct {
 	file               *os.File
+	gzipReader         *gzip.Reader
 	fileBuffer         []byte
-	filePosition       int64
 	fileLine           int64
 	packetsBucketIndex int
 	packetsBucket      []string
 }
 
 const (
-	FILE_READ_CHUNK_SIZE = 28192
+	// each cam file line has the following digits: 1 control, 2 spaces, up to 19 of timestamp, up to 131070 digits (65355 packet bytes)
+	// 256KB is a good number, despite being an oversized number, it is still a small amount of memory
+	FILE_READ_CHUNK_SIZE = 262144 // 256 KB
 )
 
 func NewCamFileReader() *CamFileReader {
 	return &CamFileReader{
-		fileBuffer:         make([]byte, FILE_READ_CHUNK_SIZE),
-		filePosition:       0,
+		fileBuffer:         make([]byte, 0, FILE_READ_CHUNK_SIZE),
 		fileLine:           0,
 		packetsBucketIndex: 0,
 	}
@@ -48,12 +51,26 @@ func (c *CamFileReader) Open(filePath string) error {
 		return fmt.Errorf("error while openning the file %s: %w", filePath, err)
 	}
 
+	extension := filepath.Ext(filePath)
+	fmt.Printf("%s\n", extension)
+	if extension == ".gz" {
+		c.gzipReader, err = gzip.NewReader(c.file)
+		if err != nil {
+			return fmt.Errorf("error creating gzip reader: %w", err)
+		}
+	}
+
 	c.fileLine = 1
 	return nil
 }
 
 func (c *CamFileReader) Close() {
-	c.file.Close()
+	if c.gzipReader != nil {
+		c.gzipReader.Close()
+	}
+	if c.file != nil {
+		c.file.Close()
+	}
 }
 
 func (c *CamFileReader) Filename() string {
@@ -90,33 +107,51 @@ func (c *CamFileReader) NextPacket() (CamPacket, error) {
 }
 
 func (c *CamFileReader) retrieveLines() ([]string, error) {
-	bytesRead, err := c.file.ReadAt(c.fileBuffer, c.filePosition)
+	var bytesRead int
+	var err error
 	var lines []string
+	rawData := make([]byte, FILE_READ_CHUNK_SIZE)
+
+	if c.gzipReader != nil {
+		bytesRead, err = c.gzipReader.Read(rawData)
+	} else {
+		bytesRead, err = c.file.Read(rawData)
+	}
 
 	if bytesRead > 0 {
-		c.filePosition += int64(bytesRead)
+		if len(c.fileBuffer) == 0 {
+			c.fileBuffer = rawData[:bytesRead]
+		} else {
+			// Use append when fileBuffer already has data (e.g., leftover from previous read)
+			c.fileBuffer = append(c.fileBuffer, rawData[:bytesRead]...)
+		}
 
 		var lastNewlineOffset int
-		for i := 0; i < bytesRead; i++ {
+		for i := 0; i < len(c.fileBuffer); i++ {
 			if c.fileBuffer[i] == '\n' {
-				// Process the line between lastNewlineOffset and current newline position
 				line := string(c.fileBuffer[lastNewlineOffset : i+1]) // +1 to include the '\n'
 				lines = append(lines, line)
 				lastNewlineOffset = i + 1
 			}
 		}
 
-		// If there is an incomplete line at the end, discard the incomplete line at this read (by adjusting filePosition)
-		if lastNewlineOffset < bytesRead {
-			c.filePosition -= int64(bytesRead - lastNewlineOffset)
+		// Keep only the incomplete line (if any) in fileBuffer
+		if lastNewlineOffset < len(c.fileBuffer) {
+			c.fileBuffer = c.fileBuffer[lastNewlineOffset:]
+		} else {
+			c.fileBuffer = c.fileBuffer[:0]
 		}
 	}
 
-	if err != nil {
-		if err != io.EOF {
-			fmt.Println("Error reading file:", err)
-		}
+	if err == io.EOF && len(c.fileBuffer) > 0 {
+		lines = append(lines, string(c.fileBuffer))
+		c.fileBuffer = c.fileBuffer[:0]
 	}
+
+	if err != nil && err != io.EOF {
+		fmt.Println("Error reading file:", err)
+	}
+
 	return lines, err
 }
 
