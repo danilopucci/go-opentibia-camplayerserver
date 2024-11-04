@@ -73,6 +73,28 @@ func (c *CamFileReader) Close() {
 	}
 }
 
+func (c *CamFileReader) Reset() error {
+	// Reset the file pointer to the beginning
+	if _, err := c.file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("error seeking to start of file: %w", err)
+	}
+
+	// Reset the gzip reader if the file is gzip-compressed
+	if c.gzipReader != nil {
+		if err := c.gzipReader.Reset(c.file); err != nil {
+			return fmt.Errorf("error resetting gzip reader: %w", err)
+		}
+	}
+
+	// Reset fields to their initial state
+	c.fileBuffer = make([]byte, 0, FILE_READ_CHUNK_SIZE)
+	c.fileLine = 1
+	c.packetsBucketIndex = 0
+	c.packetsBucket = nil
+
+	return nil
+}
+
 func (c *CamFileReader) Filename() string {
 	return c.file.Name()
 }
@@ -104,6 +126,29 @@ func (c *CamFileReader) NextPacket() (CamPacket, error) {
 	}
 
 	return camPacket, nil
+}
+
+func (c *CamFileReader) LastPacket() (CamPacket, error) {
+	var lastLine string
+
+	for {
+		lines, err := c.retrieveLines()
+		if len(lines) > 0 {
+			lastLine = lines[len(lines)-1] // Keep the last line of each read
+		}
+
+		if err == io.EOF {
+			// End of file, return the last line as a packet
+			if lastLine == "" {
+				return CamPacket{}, io.EOF
+			}
+			return parseCamPacket(&lastLine)
+		}
+
+		if err != nil {
+			return CamPacket{}, fmt.Errorf("error reading file: %w", err)
+		}
+	}
 }
 
 func (c *CamFileReader) retrieveLines() ([]string, error) {

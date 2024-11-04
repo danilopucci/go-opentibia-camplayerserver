@@ -20,18 +20,24 @@ type CamPacket struct {
 var ErrParse = errors.New("parse error")
 
 type CamStats struct {
-	currentTime float32
-	duration    float32
+	currentTime float64
+	duration    float64
 	speed       float64
 	date        string
 }
 
 func (c *CamStats) Format() string {
-	if c.speed <= 0 {
-		return fmt.Sprintf("%.1f | Paused", c.currentTime)
-	} else {
-		return fmt.Sprintf("%.1f | Speed: %.2fx", c.currentTime, c.speed)
+	durationStr := "?"
+	if c.duration > 0 {
+		durationStr = fmt.Sprintf("%.1f", c.duration)
 	}
+
+	speedStr := "Paused"
+	if c.speed > 0 {
+		speedStr = fmt.Sprintf("Speed: %.2fx", c.speed)
+	}
+
+	return fmt.Sprintf("%.1f/%s | %s", c.currentTime, durationStr, speedStr)
 }
 
 func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath string) {
@@ -47,15 +53,22 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 	}
 	defer camFileReader.Close()
 
+	var camStats CamStats
+	camStats.speed = 1.0
+
+	lastPacket, err := camFileReader.LastPacket()
+	camFileReader.Reset()
+
+	if err == nil {
+		camStats.duration = float64(lastPacket.Timestamp) / 1000.0
+	}
+
 	previousTimestamp := int64(0)
 	nextProcessPacketTimestamp := time.Now()
 	nextBeatcountTimestamp := time.Now()
 
 	poolInterval := 5 * time.Millisecond
 	beatCountInterval := 100 * time.Millisecond
-
-	var camStats CamStats
-	camStats.speed = 1.0
 
 	welcomeMessageSent := false
 	welcomeMessage := "Welcome"
@@ -122,7 +135,7 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 				}
 				previousTimestamp = camPacket.Timestamp
 
-				camStats.currentTime = float32(camPacket.Timestamp) / 1000.0
+				camStats.currentTime = float64(camPacket.Timestamp) / 1000.0
 
 				protocol.SendRawData(c.Conn, c.XteaKey, &camPacket.Data)
 
