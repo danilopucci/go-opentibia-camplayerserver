@@ -6,6 +6,7 @@ import (
 	"go-opentibia-camplayerserver/client"
 	"go-opentibia-camplayerserver/protocol"
 	"io"
+	"math"
 	"sync"
 	"time"
 )
@@ -21,12 +22,16 @@ var ErrParse = errors.New("parse error")
 type CamStats struct {
 	currentTime float32
 	duration    float32
-	speed       float32
+	speed       float64
 	date        string
 }
 
 func (c *CamStats) Format() string {
-	return fmt.Sprintf("%.1f | Speed: %.2fx", c.currentTime, c.speed)
+	if c.speed <= 0 {
+		return fmt.Sprintf("%.1f | Paused", c.currentTime)
+	} else {
+		return fmt.Sprintf("%.1f | Speed: %.2fx", c.currentTime, c.speed)
+	}
 }
 
 func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath string) {
@@ -55,8 +60,8 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 	welcomeMessageSent := false
 	welcomeMessage := "Welcome"
 
-	maxmiumSpeed := float32(64)
-	minimumSpeed := float32(0.25)
+	maximumSpeed := float64(64)
+	minimumSpeed := float64(0.25)
 
 	for {
 		select {
@@ -68,18 +73,17 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 			switch command {
 
 			case "speedUp":
-				camStats.speed *= 2
-				if camStats.speed >= maxmiumSpeed {
-					camStats.speed = maxmiumSpeed
+				if camStats.speed <= 0 {
+					camStats.speed = 1
+				} else {
+					camStats.speed = math.Min(camStats.speed*2, maximumSpeed)
 				}
-				fmt.Printf("increased speed to %f\n", camStats.speed)
 
 			case "speedDown":
-				camStats.speed /= 2
-				if camStats.speed <= minimumSpeed {
-					camStats.speed = minimumSpeed
-				}
-				fmt.Printf("decreased speed to %f\n", camStats.speed)
+				camStats.speed = math.Max(camStats.speed/2, minimumSpeed)
+
+			case "pause":
+				camStats.speed = 0
 
 			case "logout":
 				fmt.Printf("CamServer is shutting down and closing file %s\n", camFileReader.Filename())
@@ -91,8 +95,7 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 
 		default:
 
-			if time.Now().After(nextProcessPacketTimestamp) {
-
+			if time.Now().After(nextProcessPacketTimestamp) && camStats.speed > 0 {
 				camPacket, err := camFileReader.NextPacket()
 
 				if err != nil {
@@ -114,7 +117,7 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 				}
 
 				if previousTimestamp != 0 {
-					delay := time.Duration(float32(camPacket.Timestamp-previousTimestamp) / camStats.speed)
+					delay := time.Duration(float64(camPacket.Timestamp-previousTimestamp) / camStats.speed)
 					nextProcessPacketTimestamp = time.Now().Add(delay * time.Millisecond)
 				}
 				previousTimestamp = camPacket.Timestamp
