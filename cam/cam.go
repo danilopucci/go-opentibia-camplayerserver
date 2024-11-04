@@ -47,9 +47,16 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 	nextBeatcountTimestamp := time.Now()
 
 	poolInterval := 5 * time.Millisecond
+	beatCountInterval := 100 * time.Millisecond
 
 	var camStats CamStats
 	camStats.speed = 1.0
+
+	welcomeMessageSent := false
+	welcomeMessage := "Welcome"
+
+	maxmiumSpeed := float32(64)
+	minimumSpeed := float32(0.25)
 
 	for {
 		select {
@@ -62,17 +69,21 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 
 			case "speedUp":
 				camStats.speed *= 2
-				if camStats.speed >= 64 {
-					camStats.speed = 64
+				if camStats.speed >= maxmiumSpeed {
+					camStats.speed = maxmiumSpeed
 				}
 				fmt.Printf("increased speed to %f\n", camStats.speed)
 
 			case "speedDown":
 				camStats.speed /= 2
-				if camStats.speed <= 0.25 {
-					camStats.speed = 0.25
+				if camStats.speed <= minimumSpeed {
+					camStats.speed = minimumSpeed
 				}
 				fmt.Printf("decreased speed to %f\n", camStats.speed)
+
+			case "logout":
+				fmt.Printf("CamServer is shutting down and closing file %s\n", camFileReader.Filename())
+				return
 			}
 
 			fmt.Printf("received command %s\n", command)
@@ -115,8 +126,14 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 			}
 
 			if time.Now().After(nextBeatcountTimestamp) {
-				protocol.SendTextMessage(c.Conn, c.XteaKey, camStats.Format(), "1")
-				nextBeatcountTimestamp = time.Now().Add(100 * time.Millisecond)
+				protocol.SendTextMessage(c.Conn, c.XteaKey, camStats.Format(), protocol.MESSAGE_STATUS_SMALL)
+
+				if !welcomeMessageSent {
+					protocol.SendTextMessage(c.Conn, c.XteaKey, welcomeMessage, protocol.MESSAGE_STATUS_CONSOLE_BLUE)
+					welcomeMessageSent = true
+				}
+
+				nextBeatcountTimestamp = time.Now().Add(beatCountInterval)
 			}
 
 			time.Sleep(poolInterval)

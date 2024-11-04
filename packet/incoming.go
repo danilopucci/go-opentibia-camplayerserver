@@ -6,6 +6,10 @@ import (
 	"go-opentibia-camplayerserver/crypt"
 )
 
+const (
+	HEADER_LENGTH = 2
+)
+
 type Incoming struct {
 	buffer   []byte
 	position int
@@ -82,8 +86,7 @@ func (p *Incoming) PeekBuffer() []byte {
 
 func (p *Incoming) XteaDecrypt(xteaKey [4]uint32) error {
 
-	lengthHeader := p.GetUint16()
-	if lengthHeader%8 != 0 {
+	if len(p.buffer)%8 != 0 {
 		return fmt.Errorf("error decrypting IncomingPacket: packet length is not multiple of eigth")
 	}
 

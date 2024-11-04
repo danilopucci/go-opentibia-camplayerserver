@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/binary"
 	"fmt"
 	"go-opentibia-camplayerserver/cam"
 	"go-opentibia-camplayerserver/client"
 	"go-opentibia-camplayerserver/config"
 	"go-opentibia-camplayerserver/crypt"
 	"go-opentibia-camplayerserver/packet"
+	"go-opentibia-camplayerserver/protocol"
+	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -14,8 +17,6 @@ import (
 	"syscall"
 	"time"
 )
-
-const INCOMING_PACKET_SIZE = 1024
 
 type LoginRequest struct {
 	ClientOs          uint16
@@ -60,6 +61,10 @@ func startCamServer(closeCamServerCh <-chan struct{}, wg *sync.WaitGroup, decryp
 				}
 				fmt.Println("[startCamServer] - Error accepting connection:", err)
 				continue
+			}
+
+			if tcpConn, ok := tcpConnection.(*net.TCPConn); ok {
+				tcpConn.SetNoDelay(true)
 			}
 
 			loginRequest, err := handleClientLoginRequest(tcpConnection, decrypter, cfg)
@@ -126,6 +131,7 @@ func main() {
 func handleClientLoginRequest(conn net.Conn, decrypter *crypt.RSA, cfg *config.Config) (LoginRequest, error) {
 	//defer conn.Close()
 
+	const INCOMING_PACKET_SIZE = 65535
 	packet := packet.NewIncoming(INCOMING_PACKET_SIZE)
 	var request LoginRequest
 	request.IsValid = false
@@ -185,7 +191,6 @@ func handleClientLoginRequest(conn net.Conn, decrypter *crypt.RSA, cfg *config.C
 
 func handleClientInputPackets(wg *sync.WaitGroup, c *client.Client) {
 	defer wg.Done()
-	//defer client.conn.Close()
 
 	for {
 		select {
@@ -194,54 +199,30 @@ func handleClientInputPackets(wg *sync.WaitGroup, c *client.Client) {
 			return
 
 		default:
-			c.Conn.SetReadDeadline(time.Now().Add(time.Second))
+			c.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
-			packet := packet.NewIncoming(INCOMING_PACKET_SIZE)
-			reqLen, err := c.Conn.Read(packet.PeekBuffer())
-
-			if err != nil {
+			header := make([]byte, packet.HEADER_LENGTH)
+			if _, err := io.ReadFull(c.Conn, header); err != nil {
 				if opErr, ok := err.(*net.OpError); ok && opErr.Timeout() {
 					continue
 				}
 				return
 			}
 
-			packet.Resize(reqLen)
-			err = packet.XteaDecrypt(c.XteaKey)
-			if err != nil {
-				fmt.Println(err)
+			// parse header: it has only the packet length
+			packetLength := int(binary.LittleEndian.Uint16(header))
+
+			packet := packet.NewIncoming(packetLength)
+			if _, err := io.ReadFull(c.Conn, packet.PeekBuffer()); err != nil {
 				continue
 			}
 
-			parsePacket(c, packet)
+			if err := packet.XteaDecrypt(c.XteaKey); err != nil {
+				fmt.Printf("Error during XteaDecrypt: %v\n", err)
+				continue
+			}
+
+			protocol.ParsePacket(c, packet)
 		}
 	}
-
-}
-
-func parsePacket(c *client.Client, packet *packet.Incoming) {
-
-	opCode := packet.GetUint8()
-
-	//fmt.Printf("packet received: %x\n", opCode)
-
-	switch opCode {
-
-	case 0x14:
-		c.CommandCh <- "logout"
-		return
-	case 0x6F:
-		c.CommandCh <- "speedUp"
-		return
-	case 0x70:
-		c.CommandCh <- "moveFoward"
-		return
-	case 0x71:
-		c.CommandCh <- "speedDown"
-		return
-	case 0x72:
-		c.CommandCh <- "moveBackward"
-		return
-	}
-
 }
