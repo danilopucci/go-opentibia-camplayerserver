@@ -1,9 +1,9 @@
 package protocol
 
 import (
-	"fmt"
 	"go-opentibia-camplayerserver/client"
 	"go-opentibia-camplayerserver/packet"
+	"strings"
 )
 
 type SpeakClass = uint8
@@ -31,9 +31,7 @@ func ParsePacket(c *client.Client, packet *packet.Incoming) {
 	opCode := packet.GetUint8()
 
 	switch opCode {
-
 	case 0x14:
-		fmt.Printf("packet logout received: %x\n", opCode)
 		c.CommandCh <- "logout"
 		return
 	case 0x6F:
@@ -50,10 +48,24 @@ func ParsePacket(c *client.Client, packet *packet.Incoming) {
 		return
 
 	case 0x96:
-		ParseSay(packet)
+		message := strings.ToLower(ParseSay(packet))
+
+		if len(message) > 0 && message[0] == '/' {
+			switch message {
+
+			case "/pause":
+				c.CommandCh <- "pause"
+				return
+
+			case "/stop":
+				c.CommandCh <- "stop"
+				return
+			}
+		}
+
+		c.CommandCh <- "talk"
 		return
 	}
-
 }
 
 func ParseSay(packet *packet.Incoming) string {
@@ -62,19 +74,12 @@ func ParseSay(packet *packet.Incoming) string {
 
 	switch speakClass {
 
-	case TALKTYPE_PRIVATE:
-	case TALKTYPE_PRIVATE_RED:
-	case TALKTYPE_RVR_ANSWER:
+	case TALKTYPE_PRIVATE, TALKTYPE_PRIVATE_RED, TALKTYPE_RVR_ANSWER:
 		packet.GetString()
-		break
 
-	case TALKTYPE_CHANNEL_Y:
-	case TALKTYPE_CHANNEL_R1:
-	case TALKTYPE_CHANNEL_R2:
+	case TALKTYPE_CHANNEL_Y, TALKTYPE_CHANNEL_R1, TALKTYPE_CHANNEL_R2:
 		packet.GetUint16()
-		break
 	default:
-		break
 	}
 
 	return packet.GetString()
