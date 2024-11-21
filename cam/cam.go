@@ -19,6 +19,11 @@ type CamPacket struct {
 
 var ErrParse = errors.New("parse error")
 
+const (
+	MINIMUM_PLAY_SPEED = 0.25
+	MAXIMUM_PLAY_SPEED = 64
+)
+
 type CamStats struct {
 	currentTime float64
 	duration    float64
@@ -38,6 +43,22 @@ func (c *CamStats) Format() string {
 	}
 
 	return fmt.Sprintf("%.1f/%s | %s", c.currentTime, durationStr, speedStr)
+}
+
+func (c *CamStats) IncreaseSpeed() {
+	if c.speed <= 0 {
+		c.speed = 1
+	} else {
+		c.speed = math.Min(c.speed*2, MAXIMUM_PLAY_SPEED)
+	}
+}
+
+func (c *CamStats) DecreaseSpeed() {
+	c.speed = math.Max(c.speed/2, MINIMUM_PLAY_SPEED)
+}
+
+func (c *CamStats) Speed(speed float64) {
+	c.speed = speed
 }
 
 func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath string) {
@@ -73,9 +94,6 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 	welcomeMessageSent := false
 	welcomeMessage := "Welcome"
 
-	maximumSpeed := float64(64)
-	minimumSpeed := float64(0.25)
-
 	for {
 		select {
 		case <-c.CancelCh:
@@ -86,17 +104,13 @@ func HandleCamFileStreaming(wg *sync.WaitGroup, c *client.Client, filePath strin
 			switch command {
 
 			case "speedUp":
-				if camStats.speed <= 0 {
-					camStats.speed = 1
-				} else {
-					camStats.speed = math.Min(camStats.speed*2, maximumSpeed)
-				}
+				camStats.IncreaseSpeed()
 
 			case "speedDown":
-				camStats.speed = math.Max(camStats.speed/2, minimumSpeed)
+				camStats.DecreaseSpeed()
 
 			case "pause":
-				camStats.speed = 0
+				camStats.Speed(0)
 
 			case "logout":
 				fmt.Printf("CamServer is shutting down and closing file %s\n", camFileReader.Filename())
